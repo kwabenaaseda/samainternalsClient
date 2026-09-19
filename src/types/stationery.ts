@@ -28,7 +28,6 @@ export interface CreateStationeryPayload {
   Student_ID: string;
   Item_ID: string;
   Quantity_Purchased: number;
-  Unit_Price: number;
   Amount_Paid: number;
   Payment_Method: import('./payments').PaymentMethod;
   Payment_Date: string;
@@ -38,5 +37,6 @@ export interface CreateStationeryPayload {
 
 export interface FulfillStationeryPayload {
   Transaction_ID: string;
-  Quantity_To_Give: number;
+  /** Must be > 0 and <= Quantity_Remaining. Backend field name. */
+  Quantity_Given: number;
 }

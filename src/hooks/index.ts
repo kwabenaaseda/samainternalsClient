@@ -1,4 +1,11 @@
 /**
  * Hooks Barrel Export
  */
-export { usePermission, usePermissions, PermissionGate } from './usePermission';
+export {
+  usePermission,
+  usePermissions,
+  useAllPermissions,
+  PermissionGate,
+  MultiPermissionGate,
+} from './usePermission';
+export { useTheme } from './useTheme';

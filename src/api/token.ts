@@ -71,6 +71,23 @@ export function clearToken(): void {
   expiresAtMs = 0;
 }
 
+/**
+ * GIS `prompt` value per requestToken mode.
+ *
+ * `undefined` is passed straight through so Google chooses (it shows the
+ * chooser when the browser has multiple signed-in accounts and consent is
+ * already granted). `'select_account'` is the only way to force the picker
+ * explicitly — which is exactly what account switching requires.
+ */
+const TOKEN_PROMPT_BY_MODE: Record<
+  'interactive' | 'silent' | 'select_account',
+  '' | 'none' | 'consent' | 'select_account' | undefined
+> = {
+  interactive: undefined,
+  silent: 'none',
+  select_account: 'select_account',
+};
+
 /** Load the GIS script once per page. */
 function loadGisScript(): Promise<void> {
   if (scriptLoadPromise) return scriptLoadPromise;
@@ -131,8 +148,11 @@ async function ensureTokenClient(): Promise<TokenClient> {
 /**
  * Run the Google sign-in/consent flow and resolve with the new token state.
  *
- * `mode: 'interactive'` shows Google's account chooser / consent UI and must
- * be called from a user gesture (the "Continue with Google" button).
+ * `mode: 'interactive'` lets Google decide whether consent/chooser is needed
+ * and must be called from a user gesture (the "Continue with Google" button).
+ * `mode: 'select_account'` explicitly forces Google's account picker, which is
+ * what "Choose a different Google account" needs — it is still the same GIS
+ * flow and the same token, just with the chooser shown.
  * `mode: 'silent'` asks Google to renew without UI; it may still be blocked
  * by the browser or require fresh consent — callers MUST handle rejection by
  * falling back to the interactive flow rather than assuming it succeeds.
@@ -141,7 +161,7 @@ async function ensureTokenClient(): Promise<TokenClient> {
  * an error (declined consent, popup blocked, missing client config).
  */
 export async function requestToken(
-  mode: 'interactive' | 'silent' = 'interactive'
+  mode: 'interactive' | 'silent' | 'select_account' = 'interactive'
 ): Promise<boolean> {
   if (!GOOGLE_CLIENT_ID) {
     throw new Error('Google sign-in is not configured (missing VITE_GOOGLE_CLIENT_ID).');
@@ -149,7 +169,7 @@ export async function requestToken(
   const client = await ensureTokenClient();
   await new Promise<TokenResponse>((resolve) => {
     pendingCallback = resolve;
-    client.requestAccessToken({ prompt: mode === 'silent' ? 'none' : undefined });
+    client.requestAccessToken({ prompt: TOKEN_PROMPT_BY_MODE[mode] });
   });
   return hasValidToken();
 }

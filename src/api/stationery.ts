@@ -43,7 +43,10 @@ export async function createStationery(
 /**
  * Fulfill a stationery transaction (partially or fully)
  * Reduces inventory and updates fulfillment status
- * Requires Quantity_To_Give to be > 0 and <= remaining quantity
+ *
+ * Backend contract: stationery.fulfill reads payload.Quantity_Given (NOT the
+ * "Quantity_To_Give" name used by the Execution API adapter). The value is the
+ * number of items physically issued to the student.
  */
 export async function fulfillStationery(
   payload: FulfillStationeryPayload

@@ -2,7 +2,7 @@
  * Permission Hook
  * Hook for checking user permissions
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useApp } from '../contexts';
 import type { PermissionCode } from '../types';
@@ -29,37 +29,76 @@ export function usePermission(permission: PermissionCode): boolean | null {
 }
 
 /**
- * Hook to check multiple permissions
+ * Check several permissions at once.
+ *
+ * The calls run in PARALLEL rather than one-after-another: the sidebar needs a
+ * permission per nav item, and sequential round-trips to Apps Script would make
+ * the menu appear item-by-item over several seconds.
+ *
+ * The hook keys off a stable signature of the requested codes rather than the
+ * array identity, so passing an inline array literal does not re-trigger the
+ * checks on every render.
  */
 export function usePermissions(permissions: PermissionCode[]): Map<PermissionCode, boolean | null> {
   const { checkPermission, isAuthenticated } = useApp();
   const [results, setResults] = useState<Map<PermissionCode, boolean | null>>(new Map());
 
+  const signature = useMemo(() => [...permissions].sort().join('|'), [permissions]);
+
   const checkAll = useCallback(async () => {
+    const codes = (signature === '' ? [] : (signature.split('|') as PermissionCode[]));
+
     if (!isAuthenticated) {
       const emptyResults = new Map<PermissionCode, boolean | null>();
-      permissions.forEach((p) => emptyResults.set(p, null));
+      codes.forEach((code) => emptyResults.set(code, null));
       setResults(emptyResults);
       return;
     }
 
-    const newResults = new Map<PermissionCode, boolean | null>();
-    for (const permission of permissions) {
-      try {
-        const result = await checkPermission(permission);
-        newResults.set(permission, result);
-      } catch {
-        newResults.set(permission, false);
-      }
-    }
-    setResults(newResults);
-  }, [permissions, checkPermission, isAuthenticated]);
+    const settled = await Promise.all(
+      codes.map(async (code) => {
+        try {
+          const allowed = await checkPermission(code);
+          return [code, allowed] as const;
+        } catch {
+          // A failed check must never be read as "allowed".
+          return [code, false] as const;
+        }
+      })
+    );
+
+    setResults(new Map(settled));
+  }, [signature, checkPermission, isAuthenticated]);
 
   useEffect(() => {
     void checkAll();
   }, [checkAll]);
 
   return results;
+}
+
+/**
+ * True once every requested permission has resolved to `true`.
+ * Returns `null` while any check is still outstanding.
+ */
+export function useAllPermissions(permissions: PermissionCode[]): boolean | null {
+  const results = usePermissions(permissions);
+
+  return useMemo(() => {
+    if (permissions.length === 0) return true;
+
+    let pending = false;
+    for (const code of permissions) {
+      const value = results.get(code);
+      if (value === null || value === undefined) {
+        pending = true;
+      } else if (value === false) {
+        return false;
+      }
+    }
+
+    return pending ? null : true;
+  }, [permissions, results]);
 }
 
 /**
@@ -77,7 +116,7 @@ export function PermissionGate({
   permission,
   children,
   fallback = null,
-  loading = <div className="animate-pulse bg-gray-200 h-4 w-24 rounded" />,
+  loading = <div className="animate-pulse bg-gray-200 dark:bg-slate-700 h-4 w-24 rounded" />,
 }: PermissionGateProps) {
   const hasPermission = usePermission(permission);
 
@@ -92,4 +131,38 @@ export function PermissionGate({
   return <>{children}</>;
 }
 
-export default { usePermission, usePermissions, PermissionGate };
+/**
+ * Like PermissionGate but requires EVERY listed permission.
+ *
+ * Used where the backend enforces more than one code for a single action —
+ * notably `stationery.fulfill`, which checks STATIONERY.FULFILL and, inside
+ * Inventory.js, INVENTORY.ADJUST as well. Rendering the action only when both
+ * are granted is a UX courtesy; the backend still enforces both independently.
+ */
+interface MultiPermissionGateProps {
+  permissions: PermissionCode[];
+  children: ReactNode;
+  fallback?: ReactNode;
+  loading?: ReactNode;
+}
+
+export function MultiPermissionGate({
+  permissions,
+  children,
+  fallback = null,
+  loading = <div className="animate-pulse bg-gray-200 dark:bg-slate-700 h-4 w-24 rounded" />,
+}: MultiPermissionGateProps) {
+  const allowed = useAllPermissions(permissions);
+
+  if (allowed === null) {
+    return <>{loading}</>;
+  }
+
+  if (!allowed) {
+    return <>{fallback}</>;
+  }
+
+  return <>{children}</>;
+}
+
+export default { usePermission, usePermissions, useAllPermissions, PermissionGate, MultiPermissionGate };

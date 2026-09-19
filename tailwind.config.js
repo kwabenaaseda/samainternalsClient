@@ -4,6 +4,12 @@ export default {
     "./index.html",
     "./src/**/*.{js,ts,jsx,tsx}",
   ],
+  /**
+   * Dark mode is opt-in via a `dark` class on <html> (see hooks/useTheme.ts).
+   * Using 'class' rather than 'media' lets staff pick a theme and keep it,
+   * instead of being forced to follow the operating-system setting.
+   */
+  darkMode: 'class',
   theme: {
     extend: {
       colors: {

@@ -1,12 +1,16 @@
 /**
  * API Client Configuration
  *
- * TRANSPORT (migrated): authenticated requests go through the Apps Script
- * *Execution API* (script.googleapis.com .../scripts/{id}:run), not the /exec
- * web-app URL. The /exec transport was abandoned because Google's web-app auth
- * layer rejects cross-origin SPA calls with a 302/401 before doPost executes
- * (and those responses carry no CORS headers). The Execution API accepts the
- * GIS OAuth bearer token and serves proper CORS headers.
+ * TRANSPORT: authenticated requests POST to the Apps Script *web app* /exec URL
+ * (`VITE_API_URL`). That transport is load-bearing: with the Web App deployed
+ * `executeAs: USER_DEPLOYING`, SpreadsheetApp runs as the SCRIPT OWNER, so a
+ * signed-in staff member never needs Drive access to the school spreadsheet.
+ * The Execution API cannot express that (it has no `executeAs` setting), so it
+ * would run as the caller and fail with PERMISSION_DENIED for non-owners.
+ *
+ * Identity still comes from Google Identity Services: the GIS access token is
+ * sent in the request body as `payload.__auth.access_token` and verified
+ * server-side by Auth.js against Google's userinfo endpoint.
  */
 
 /**
@@ -93,6 +97,16 @@ export const API_BASE_URL =
     : `https://script.google.com/macros/s/${PLACEHOLDER_SCRIPT_ID}/exec`;
 
 /**
+ * True when the /exec web-app URL is a real deployment rather than the
+ * placeholder substituted above.
+ *
+ * This — not the script id — is what the request transport needs, because every
+ * API call now POSTs to /exec (see client.ts). Checking it in one place keeps
+ * the auth screen's configuration notice and the client's guard from drifting.
+ */
+export const IS_EXEC_URL_CONFIGURED = !API_BASE_URL.includes(PLACEHOLDER_SCRIPT_ID);
+
+/**
  * Google's own sign-out endpoint.
  *
  * This is the only real sign-out that exists for this architecture: Google's
@@ -101,10 +115,15 @@ export const API_BASE_URL =
  */
 export const GOOGLE_SIGN_OUT_URL = 'https://accounts.google.com/Logout';
 
-/**
- * Google's own account chooser, pointed back at the deployed web app.
- * Lets the user switch which Google account is used.
+/*
+ * NOTE: there is deliberately no GOOGLE_ACCOUNT_CHOOSER_URL export.
+ *
+ * A previous implementation built one as
+ *   AccountChooser?continue=<WEB_APP_URL>
+ * and opened it in a new tab. Because `continue` pointed at the /exec endpoint,
+ * Google finished by loading that URL directly — which answered
+ * "Missing required \"action\"" instead of signing the user in. Account
+ * switching is therefore done through GIS (`requestToken('select_account')`),
+ * which shows Google's real picker and returns a fresh access token to the SPA.
  */
-export const GOOGLE_ACCOUNT_CHOOSER_URL =
-  'https://accounts.google.com/AccountChooser?continue=' + encodeURIComponent(API_BASE_URL);
 

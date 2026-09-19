@@ -20,10 +20,7 @@ import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { useApp } from '../../contexts';
 import { Button } from '../../components/ui';
-import {
-  GOOGLE_ACCOUNT_CHOOSER_URL,
-  IS_API_CONFIGURED,
-} from '../../api/config';
+import { IS_EXEC_URL_CONFIGURED } from '../../api/config';
 import { clearToken, requestToken } from '../../api/token';
 
 /** Google's four-colour mark, used only as a sign-in affordance. */
@@ -164,10 +161,48 @@ const CONNECTION_MESSAGE = 'Unable to connect to the school management system.';
 export function AuthScreen() {
   const { authStatus, authMessage, refreshSession } = useApp();
   const [isRetrying, setIsRetrying] = useState(false);
+  const [signInError, setSignInError] = useState<string | null>(null);
 
-  /** Re-run auth.me. This is the only "sign in" action the SPA can perform. */
+  /**
+   * Run the GIS flow and re-resolve the session. Both sign-in affordances on
+   * this screen ultimately do the same thing; the only difference is whether
+   * Google is asked to show its account picker:
+   *
+   *   'interactive'    → Google decides: signs in silently when a single
+   *                      account is active and consent was already granted.
+   *   'select_account' → always show the chooser ("Choose a different Google
+   *                      account").
+   *
+   * Either way the access token lands in the same in-memory holder, and the
+   * backend still decides whether that identity is an Active SAMS user — the
+   * token alone never grants access.
+   */
+  const authenticate = async (mode: 'interactive' | 'select_account') => {
+    setIsRetrying(true);
+    setSignInError(null);
+    try {
+      // A deliberate account switch must not reuse the previous identity's
+      // token; dropping it first makes the change unambiguous.
+      if (mode === 'select_account') clearToken();
+
+      const gotToken = await requestToken(mode);
+      if (gotToken) {
+        await refreshSession();
+      }
+    } catch (err) {
+      // GIS refused (popup blocked, client id misconfigured, window closed).
+      // There is deliberately no fallback path: the screen stays on the
+      // sign-in state and shows what went wrong instead of faking a session.
+      setSignInError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsRetrying(false);
+    }
+  };
+
+  /** Re-run `auth.me` only — used by the Retry affordance. */
   const retry = async () => {
     setIsRetrying(true);
+    setSignInError(null);
     try {
       await refreshSession();
     } finally {
@@ -175,41 +210,12 @@ export function AuthScreen() {
     }
   };
 
-  /**
-   * "Continue with Google": run the GIS sign-in/consent flow to obtain a fresh
-   * access token (memory only), then re-resolve the session. If Google returns
-   * an error (declined, popup blocked, misconfigured client) the app simply
-   * re-renders the sign-in state; there is no fake fallback.
-   */
-  const signInWithGoogle = async () => {
-    setIsRetrying(true);
-    try {
-      const gotToken = await requestToken('interactive');
-      if (gotToken) {
-        await refreshSession();
-      }
-    } finally {
-      setIsRetrying(false);
-    }
-  };
-
-  /** Drop the current token and restart the flow with Google's chooser. */
-  const switchAccount = () => {
-    clearToken();
-    openAccountChooser();
-  };
-
-  /** Hand the browser to Google so its own account flow can run. */
-  const openAccountChooser = () => {
-    window.open(GOOGLE_ACCOUNT_CHOOSER_URL, '_blank', 'noopener,noreferrer');
-  };
-
   return (
     <div className="min-h-screen bg-gray-100 flex items-center justify-center px-4 py-10">
       <div className="w-full max-w-md">
         <BrandHeader />
 
-        {!IS_API_CONFIGURED && <ConfigNotice />}
+        {!IS_EXEC_URL_CONFIGURED && <ConfigNotice />}
 
         <AuthCard>
           {authStatus === 'checking' && <CheckingBody />}
@@ -226,7 +232,7 @@ export function AuthScreen() {
                   variant="primary"
                   size="lg"
                   className="w-full"
-                  onClick={signInWithGoogle}
+                  onClick={() => authenticate('interactive')}
                   loading={isRetrying}
                   icon={<GoogleMark />}
                 >
@@ -236,11 +242,18 @@ export function AuthScreen() {
                   variant="secondary"
                   size="lg"
                   className="w-full"
-                  onClick={openAccountChooser}
+                  onClick={() => authenticate('select_account')}
+                  disabled={isRetrying}
                 >
                   Choose a different Google account
                 </Button>
               </div>
+
+              {signInError && (
+                <p className="mt-3 text-xs text-red-600 break-words">
+                  Google sign-in did not complete: {signInError}
+                </p>
+              )}
 
               <p className="mt-4 text-xs text-gray-500">
                 You will sign in with your school Google account through Google's
@@ -284,7 +297,8 @@ export function AuthScreen() {
                   variant="secondary"
                   size="lg"
                   className="w-full"
-                  onClick={switchAccount}
+                  onClick={() => authenticate('select_account')}
+                  disabled={isRetrying}
                 >
                   Use a different Google account
                 </Button>

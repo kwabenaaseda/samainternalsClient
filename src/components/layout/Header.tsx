@@ -11,8 +11,44 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useApp } from '../../contexts';
 import { SearchInput } from '../ui';
+import { useTheme } from '../../hooks';
 import { GOOGLE_SIGN_OUT_URL } from '../../api/config';
 import { getUserInitials } from '../../utils/user';
+
+/** Light/dark switch. The preference is local UI state only (see useTheme). */
+function ThemeToggle() {
+  const { isDark, toggleTheme } = useTheme();
+
+  return (
+    <button
+      type="button"
+      onClick={toggleTheme}
+      title={isDark ? 'Switch to light theme' : 'Switch to dark theme'}
+      aria-label={isDark ? 'Switch to light theme' : 'Switch to dark theme'}
+      className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+    >
+      {isDark ? (
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={2}
+            d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"
+          />
+        </svg>
+      ) : (
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={2}
+            d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"
+          />
+        </svg>
+      )}
+    </button>
+  );
+}
 
 interface Breadcrumb {
   label: string;
@@ -70,7 +106,7 @@ export function Header() {
   };
 
   return (
-    <header className="h-16 border-b border-gray-200 bg-white flex items-center px-6 gap-4">
+    <header className="h-16 border-b border-gray-200 bg-white flex items-center px-6 gap-4 dark:border-slate-800 dark:bg-slate-900">
       {/* Breadcrumbs */}
       <nav className="flex items-center gap-2 text-sm flex-1 min-w-0">
         {breadcrumbs.map((crumb, index) => (
@@ -110,8 +146,11 @@ export function Header() {
         />
       </div>
 
+      {/* Theme switch */}
+      <ThemeToggle />
+
       {/* Notification icon */}
-      <button className="relative p-2 text-gray-400 hover:text-gray-600 transition-colors">
+      <button className="relative p-2 text-gray-400 hover:text-gray-600 transition-colors dark:hover:text-slate-200">
         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
         </svg>
@@ -123,7 +162,7 @@ export function Header() {
         <button
           type="button"
           onClick={() => setIsProfileOpen((open) => !open)}
-          className="flex items-center gap-2 p-1.5 sm:pl-3 rounded-lg hover:bg-gray-100 transition-colors"
+          className="flex items-center gap-2 p-1.5 sm:pl-3 rounded-lg hover:bg-gray-100 transition-colors dark:hover:bg-slate-800"
           aria-haspopup="menu"
           aria-expanded={isProfileOpen}
         >
@@ -141,9 +180,9 @@ export function Header() {
         {isProfileOpen && (
           <div
             role="menu"
-            className="absolute right-0 mt-2 w-72 bg-white border border-gray-200 rounded-lg shadow-lg py-2 z-50"
+            className="absolute right-0 mt-2 w-72 bg-white border border-gray-200 rounded-lg shadow-lg py-2 z-50 dark:bg-slate-900 dark:border-slate-700"
           >
-            <div className="px-4 py-3 border-b border-gray-100">
+            <div className="px-4 py-3 border-b border-gray-100 dark:border-slate-800">
               <div className="flex items-center gap-3">
                 <span className="w-10 h-10 bg-primary/20 rounded-full flex items-center justify-center text-primary text-sm font-medium flex-shrink-0">
                   {getUserInitials(user?.email)}
@@ -172,7 +211,7 @@ export function Header() {
               type="button"
               onClick={handleRefreshSession}
               disabled={isRefreshing}
-              className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+              className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-60 dark:text-slate-300 dark:hover:bg-slate-800"
             >
               {isRefreshing ? 'Refreshing session…' : 'Refresh session'}
             </button>
@@ -186,7 +225,7 @@ export function Header() {
               href={GOOGLE_SIGN_OUT_URL}
               target="_blank"
               rel="noopener noreferrer"
-              className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+              className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 dark:text-slate-300 dark:hover:bg-slate-800"
             >
               Sign out of Google
             </a>

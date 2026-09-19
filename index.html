@@ -5,8 +5,28 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SAMS — School Management System</title>
+    <script>
+      /*
+       * Apply the stored theme before the bundle runs so there is no flash of
+       * the wrong theme. Mirrors hooks/useTheme.ts (key: sams-theme). Wrapped in
+       * try/catch because storage can be unavailable in private mode.
+       */
+      (function () {
+        try {
+          var stored = localStorage.getItem('sams-theme');
+          var dark =
+            stored === 'dark' ||
+            ((stored === 'system' || !stored) &&
+              window.matchMedia('(prefers-color-scheme: dark)').matches);
+          if (dark) document.documentElement.classList.add('dark');
+          document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+        } catch (e) {
+          /* keep the default light theme */
+        }
+      })();
+    </script>
   </head>
-  <body class="bg-white">
+  <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

@@ -1,4 +1,4 @@
-import { API_BASE_URL, API_TIMEOUT } from './config';
+import { API_BASE_URL, API_TIMEOUT, IS_EXEC_URL_CONFIGURED } from './config';
 import { getToken, clearToken } from './token';
 import type { ApiResponse } from '../types';
 
@@ -36,13 +36,6 @@ interface ApiRequestOptions {
   method?: 'GET' | 'POST';
   timeout?: number;
 }
-
-/**
- * The /exec transport needs the deployed web-app URL. config.ts substitutes a
- * placeholder when VITE_API_URL is unset, so detect that rather than POSTing to
- * a URL that cannot exist.
- */
-const IS_EXEC_URL_CONFIGURED = !API_BASE_URL.includes('YOUR_SCRIPT_ID');
 
 /** Error code carrier for the structured errors this client throws. */
 type CodedError = Error & { code: string; details?: unknown };

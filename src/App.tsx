@@ -13,6 +13,8 @@ import { FeedingFees } from './pages/fees/FeedingFees';
 import { CreateFeedingFee } from './pages/fees/CreateFeedingFee';
 import { Staff } from './pages/staff/Staff';
 import { CreateStaff } from './pages/staff/CreateStaff';
+import { Stationery } from './pages/stationery/Stationery';
+import { CreateStationery } from './pages/stationery/CreateStationery';
 import { Inventory } from './pages/inventory/Inventory';
 import { Settings } from './pages/Settings';
 
@@ -57,8 +59,9 @@ export function App() {
         <Route path="/feeding-fees/new" element={<CreateFeedingFee />} />
 
         <Route path="/staff" element={<Staff />} />
-        <Route path="/staff/create" element={<CreateStaff />} />
-
+                <Route path="/staff/create" element={<CreateStaff />} />
+        <Route path="/stationery" element={<Stationery />} />
+        <Route path="/stationery/new" element={<CreateStationery />} />
         <Route path="/inventory" element={<Inventory />} />
         <Route path="/settings" element={<Settings />} />
 
