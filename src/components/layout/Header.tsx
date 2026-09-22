@@ -55,7 +55,12 @@ interface Breadcrumb {
   href?: string;
 }
 
-export function Header() {
+interface HeaderProps {
+  /** Toggles the off-canvas sidebar drawer on small screens (wired by Layout). */
+  onMenuClick?: () => void;
+}
+
+export function Header({ onMenuClick }: HeaderProps) {
   const location = useLocation();
   const { user, refreshSession } = useApp();
   const [searchQuery, setSearchQuery] = useState('');
@@ -106,7 +111,20 @@ export function Header() {
   };
 
   return (
-    <header className="h-16 border-b border-gray-200 bg-white flex items-center px-6 gap-4 dark:border-slate-800 dark:bg-slate-900">
+    <header className="h-16 border-b border-gray-200 bg-white flex items-center px-4 sm:px-6 gap-4 dark:border-slate-800 dark:bg-slate-900">
+      {/* Mobile menu toggle — opens the off-canvas sidebar drawer (Layout). */}
+      <button
+        type="button"
+        onClick={onMenuClick}
+        className="md:hidden p-2 -ml-2 rounded-lg text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+        aria-label="Toggle navigation menu"
+        aria-controls="app-sidebar"
+      >
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+        </svg>
+      </button>
+
       {/* Breadcrumbs */}
       <nav className="flex items-center gap-2 text-sm flex-1 min-w-0">
         {breadcrumbs.map((crumb, index) => (

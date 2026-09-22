@@ -38,6 +38,10 @@ export function usePermission(permission: PermissionCode): boolean | null {
  * The hook keys off a stable signature of the requested codes rather than the
  * array identity, so passing an inline array literal does not re-trigger the
  * checks on every render.
+ *
+ * A code that could not be answered stays `null` (unknown) -- it is never
+ * reported as `false` (denied). `permissionErrors` on AppContext carries the
+ * reason for such a code.
  */
 export function usePermissions(permissions: PermissionCode[]): Map<PermissionCode, boolean | null> {
   const { checkPermission, isAuthenticated } = useApp();
@@ -61,8 +65,9 @@ export function usePermissions(permissions: PermissionCode[]): Map<PermissionCod
           const allowed = await checkPermission(code);
           return [code, allowed] as const;
         } catch {
-          // A failed check must never be read as "allowed".
-          return [code, false] as const;
+          // A failed check is not a denial: report "unknown" so callers can tell
+          // the two apart. It is still never read as "allowed".
+          return [code, null] as const;
         }
       })
     );
@@ -75,6 +80,24 @@ export function usePermissions(permissions: PermissionCode[]): Map<PermissionCod
   }, [checkAll]);
 
   return results;
+}
+
+/**
+ * Why a permission check could not be answered, or null when it was.
+ *
+ * `usePermission` returning `null` means "unknown"; this returns the backend's
+ * own reason (e.g. a SERVER_ERROR about a missing Role_Permissions sheet), so a
+ * failed check can be shown as a failure instead of as an authorization denial.
+ */
+export function usePermissionError(permission: PermissionCode): string | null {
+  const { permissionErrors } = useApp();
+  return permissionErrors.get(permission) ?? null;
+}
+
+/** Re-ask the backend for a permission whose check previously failed. */
+export function usePermissionRetry(): (permission: PermissionCode) => Promise<boolean | null> {
+  const { retryPermission } = useApp();
+  return retryPermission;
 }
 
 /**
@@ -110,6 +133,12 @@ interface PermissionGateProps {
   children: ReactNode;
   fallback?: ReactNode;
   loading?: ReactNode;
+  /**
+   * Rendered when the backend could not answer the check at all (a failure, not
+   * a denial). Defaults to `fallback`, because an action that cannot be verified
+   * must not be offered -- the route guard is where the reason is explained.
+   */
+  errorFallback?: ReactNode;
 }
 
 export function PermissionGate({
@@ -117,10 +146,17 @@ export function PermissionGate({
   children,
   fallback = null,
   loading = <div className="animate-pulse bg-gray-200 dark:bg-slate-700 h-4 w-24 rounded" />,
+  errorFallback,
 }: PermissionGateProps) {
   const hasPermission = usePermission(permission);
+  const error = usePermissionError(permission);
 
   if (hasPermission === null) {
+    // A failed check is neither a denial nor "still loading": resolve it
+    // immediately instead of leaving the caller on a spinner that never ends.
+    if (error !== null) {
+      return <>{errorFallback ?? fallback}</>;
+    }
     return <>{loading}</>;
   }
 

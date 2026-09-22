@@ -29,6 +29,11 @@ interface TokenResponse {
   error?: string;
 }
 
+interface GisError {
+  type?: string;
+  message?: string;
+}
+
 interface TokenClient {
   requestAccessToken: (options?: { prompt?: '' | 'none' | 'consent' | 'select_account' }) => void;
 }
@@ -40,6 +45,11 @@ interface GoogleGlobal {
         client_id: string;
         scope: string;
         callback: (response: TokenResponse) => void;
+        /** Invoked by GIS when the token request fails outright (e.g. the
+         *  hidden-iframe silent request is aborted or blocked). Without this,
+         *  GIS leaves the waiter dangling and its internal network promise can
+         *  reject unobserved (Firefox reports this as NS_ERROR_ABORT). */
+        error_callback?: (error: GisError) => void;
       }) => TokenClient;
     };
   };
@@ -54,6 +64,8 @@ let tokenClient: TokenClient | null = null;
 let scriptLoadPromise: Promise<void> | null = null;
 /** Resolvers waiting on the callback fired by requestAccessToken(). */
 let pendingCallback: ((response: TokenResponse) => void) | null = null;
+/** The one requestToken() call currently talking to GIS, if any. */
+let inFlightTokenRequest: Promise<boolean> | null = null;
 
 /** True when a token exists and has not passed its expiry. */
 export function hasValidToken(): boolean {
@@ -116,6 +128,13 @@ function loadGisScript(): Promise<void> {
   return scriptLoadPromise;
 }
 
+/** Resolve every pending waiter explicitly (success, error, or abort). */
+function settlePending(response: TokenResponse): void {
+  const resolver = pendingCallback;
+  pendingCallback = null;
+  resolver?.(response);
+}
+
 /** Build the token client once the GIS script is present. */
 async function ensureTokenClient(): Promise<TokenClient> {
   if (tokenClient) return tokenClient;
@@ -137,9 +156,14 @@ async function ensureTokenClient(): Promise<TokenClient> {
       } else {
         clearToken();
       }
-      const resolver = pendingCallback;
-      pendingCallback = null;
-      resolver?.(response);
+      settlePending(response);
+    },
+    error_callback: (error) => {
+      // GIS reports the failure here instead of leaving the request hanging.
+      // Clear the token so hasValidToken() reflects reality and resolve the
+      // waiter so no requestToken() caller is left pending forever.
+      clearToken();
+      settlePending({ error: error?.type ?? 'token_request_failed' });
     },
   });
   return tokenClient;
@@ -163,15 +187,29 @@ async function ensureTokenClient(): Promise<TokenClient> {
 export async function requestToken(
   mode: 'interactive' | 'silent' | 'select_account' = 'interactive'
 ): Promise<boolean> {
-  if (!GOOGLE_CLIENT_ID) {
-    throw new Error('Google sign-in is not configured (missing VITE_GOOGLE_CLIENT_ID).');
-  }
-  const client = await ensureTokenClient();
-  await new Promise<TokenResponse>((resolve) => {
-    pendingCallback = resolve;
-    client.requestAccessToken({ prompt: TOKEN_PROMPT_BY_MODE[mode] });
-  });
-  return hasValidToken();
+  // Serialize: GIS exposes a single callback channel through initTokenClient,
+  // so overlapping requests would clobber each other's waiter (one caller's
+  // response resolving another's promise). Reuse the in-flight request
+  // instead — it always settles via callback or error_callback.
+  if (inFlightTokenRequest) return inFlightTokenRequest;
+
+  inFlightTokenRequest = (async () => {
+    try {
+      if (!GOOGLE_CLIENT_ID) {
+        throw new Error('Google sign-in is not configured (missing VITE_GOOGLE_CLIENT_ID).');
+      }
+      const client = await ensureTokenClient();
+      await new Promise<TokenResponse>((resolve) => {
+        pendingCallback = resolve;
+        client.requestAccessToken({ prompt: TOKEN_PROMPT_BY_MODE[mode] });
+      });
+      return hasValidToken();
+    } finally {
+      inFlightTokenRequest = null;
+    }
+  })();
+
+  return inFlightTokenRequest;
 }
 
 export default {

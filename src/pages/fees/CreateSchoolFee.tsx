@@ -1,23 +1,35 @@
 /**
  * CreateSchoolFee
  *
- * The "Record Payment" flow for a school fee, driven entirely by backend actions
- * the contract already exposes — no new endpoints:
+ * The "Record Payment" flow for school fees, against the Option 2 backend
+ * contract (SchoolFeePayments.js). No new endpoints are introduced:
  *
- *   students.list     → pick the student  (reuse the student-search pattern)
- *   schoolFees.list   → view the student's CURRENT balance (server-calculated)
- *   schoolFees.create → record the payment
+ *   students.list      -> pick the student
+ *   schoolFees.list    -> that student's fee ACCOUNTS (year + term obligations)
+ *   feePayments.list   -> the selected account's transactions + server totals
+ *   feePayments.create -> record the money actually received
  *
- * Money rules (SchoolFees.js) the frontend obeys without overriding:
- *  - Balance = Amount_Due - Amount_Paid  (always the backend's value)
- *  - Amount_Paid must not exceed Amount_Due (backend enforces; mirrored client-side)
- *  - Status is derived by the backend (Unpaid | Partial | Paid | Voided)
- * The student's outstanding balance shown here is a SUM of the backend's own
- * per-record Balance figures. The form never computes a balance of its own.
+ * MONEY MODEL:
+ *   A School_Fees row is a fee ACCOUNT whose Amount_Due is the FEE AMOUNT --
+ *   not a payment. Money is recorded as a School_Fee_Payments TRANSACTION whose
+ *   Amount is the amount received. Amount_Paid / Balance / Status on the account
+ *   are server-derived aggregates over the non-voided transactions.
+ *
+ *   This form therefore:
+ *     - never sends Amount_Paid, Payment_Method or Payment_Date to
+ *       schoolFees.create (it does not call schoolFees.create at all),
+ *     - never treats Amount_Due as the payment amount,
+ *     - sends only { Fee_ID, Amount, Payment_Method, Payment_Date, Reference,
+ *       Notes } to feePayments.create.
+ *
+ *   Balances shown after a payment come from the backend's own response
+ *   (`account`) and from a refreshed feePayments.list read. The form never
+ *   computes an authoritative balance of its own.
  */
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { createSchoolFee, listSchoolFees } from '../../api/schoolFees';
+import { listSchoolFees } from '../../api/schoolFees';
+import { createFeePayment, listFeePaymentsForAccount } from '../../api/feePayments';
 import { listStudents } from '../../api/students';
 import {
   getMissingFields,
@@ -44,18 +56,21 @@ import {
 } from '../../components/ui';
 import { useToast } from '../../contexts';
 import { usePermissions } from '../../hooks';
-import type { Payment, PaymentMethod, PermissionCode, Student, Term } from '../../types';
+import type {
+  FeePayment,
+  FeePaymentLedger,
+  FeePaymentMutationResult,
+  Payment,
+  PaymentMethod,
+  PaymentStatus,
+  PermissionCode,
+  Student,
+} from '../../types';
 
 const PAGE_PERMISSIONS: PermissionCode[] = [
   'SCHOOL_FEES.CREATE',
   'SCHOOL_FEES.READ',
   'STUDENTS.READ',
-];
-
-const TERM_OPTIONS: { value: string; label: string }[] = [
-  { value: 'Term 1', label: 'Term 1' },
-  { value: 'Term 2', label: 'Term 2' },
-  { value: 'Term 3', label: 'Term 3' },
 ];
 
 const PAYMENT_METHOD_OPTIONS: { value: string; label: string }[] = [
@@ -65,22 +80,21 @@ const PAYMENT_METHOD_OPTIONS: { value: string; label: string }[] = [
   { value: 'Other', label: 'Other' },
 ];
 
+/** Labels for the fee-payment fields the backend reports errors against. */
 const FIELD_LABELS: Record<string, string> = {
-  Academic_Year: 'Academic year',
-  Term: 'Term',
-  Amount_Due: 'Amount due',
-  Amount_Paid: 'Amount paid',
+  Fee_ID: 'Fee account',
+  Amount: 'Amount received',
   Payment_Method: 'Payment method',
   Payment_Date: 'Payment date',
   Reference: 'Reference',
   Notes: 'Notes',
 };
 
-/** Today's date as a YYYY-MM-DD string for the date picker default. */
+/** Today's date as a YYYY-MM-DD string for the payment date default. */
 const todayISO = new Date().toISOString().split('T')[0];
 
 /** Currency formatting, matching Dashboard's GHS convention. */
-function formatAmount(value: number): string {
+function formatAmount(value: number | undefined): string {
   const n = Number(value) || 0;
   return `GHS ${n.toLocaleString('en-US', {
     minimumFractionDigits: 2,
@@ -88,47 +102,52 @@ function formatAmount(value: number): string {
   })}`;
 }
 
-interface FieldErrorInfo {
-  field?: string;
-  message: string;
+/** The field name a backend VALIDATION_ERROR points at, if any. */
+function readErrorField(error: unknown): string | undefined {
+  const details = ((error ?? {}) as { details?: { field?: unknown } }).details;
+  return details && typeof details.field === 'string' ? details.field : undefined;
 }
 
-/** Pulls a field name out of a backend VALIDATION_ERROR's `details`, if present. */
-function extractFieldError(error: unknown): FieldErrorInfo {
-  const apiError = (error ?? {}) as { message?: unknown; details?: { field?: unknown } };
-  const field =
-    apiError.details && typeof apiError.details.field === 'string'
-      ? apiError.details.field
-      : undefined;
-  return {
-    field,
-    message: typeof apiError.message === 'string' ? apiError.message : '',
-  };
+/** The account figures the UI displays; always the backend's own numbers. */
+interface AccountView {
+  Fee_ID: string;
+  Academic_Year: string;
+  Term: string;
+  /** Fee amount (School_Fees.Amount_Due). */
+  Fee_Amount: number;
+  /** Sum of non-voided transactions. */
+  Total_Paid: number;
+  /** Fee_Amount - Total_Paid. */
+  Outstanding: number;
+  Status: PaymentStatus;
 }
 
 export function CreateSchoolFee() {
   const navigate = useNavigate();
   const { addToast } = useToast();
   const permissions = usePermissions(PAGE_PERMISSIONS);
-  const canCreate = permissions.get('SCHOOL_FEES.CREATE') === true;
+  const canRecord = permissions.get('SCHOOL_FEES.CREATE') === true;
 
   // --- Step 1: pick a student ---
   const [students, setStudents] = useState<Student[]>([]);
   const [studentSearch, setStudentSearch] = useState('');
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
 
-  // --- Step 2: show that student's current balance + history ---
-  const [feeRecords, setFeeRecords] = useState<Payment[]>([]);
-  const [balanceLoading, setBalanceLoading] = useState(false);
-  const [balanceError, setBalanceError] = useState<string | null>(null);
+  // --- Step 2: the student's fee ACCOUNTS (year + term obligations) ---
+  const [accounts, setAccounts] = useState<Payment[]>([]);
+  const [accountsLoading, setAccountsLoading] = useState(false);
+  const [accountsError, setAccountsError] = useState<string | null>(null);
+  const [selectedAccount, setSelectedAccount] = useState<Payment | null>(null);
 
-  // --- The payment form ---
+  // --- Step 3: the selected account's transactions + server totals ---
+  const [ledger, setLedger] = useState<FeePaymentLedger | null>(null);
+  const [ledgerLoading, setLedgerLoading] = useState(false);
+  const [ledgerError, setLedgerError] = useState<string | null>(null);
+
+  // --- The payment form. Amount is the money RECEIVED, never Amount_Due. ---
   const [form, setForm] = useState({
-    Academic_Year: '',
-    Term: '',
-    Amount_Due: 0,
-    Amount_Paid: 0,
-    Payment_Method: '',
+    Amount: 0,
+    Payment_Method: 'Cash',
     Payment_Date: todayISO,
     Reference: '',
     Notes: '',
@@ -136,7 +155,9 @@ export function CreateSchoolFee() {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState('');
   const [submitting, setSubmitting] = useState(false);
-    const loadStudents = useCallback(async () => {
+  const [lastResult, setLastResult] = useState<FeePaymentMutationResult | null>(null);
+
+  const loadStudents = useCallback(async () => {
     try {
       setStudents(await listStudents());
     } catch (err) {
@@ -149,9 +170,8 @@ export function CreateSchoolFee() {
     void loadStudents();
   }, [loadStudents]);
 
-  /** Students shown in the picker. Withdrawn students are excluded because the
-   * backend rejects payments for them; everything else (Active, Graduated,
-   * Suspended) is allowed since `students.create` only blocks Withdrawn. */
+  /** Students offered in the picker. Withdrawn students are excluded because
+   * the backend refuses new money for them; every other status is allowed. */
   const pickableStudents = useMemo(() => {
     const term = studentSearch.trim().toLowerCase();
     return students.filter((s) => {
@@ -166,62 +186,128 @@ export function CreateSchoolFee() {
     });
   }, [students, studentSearch]);
 
+  /** The student's fee accounts. The backend re-derives Amount_Paid/Balance/
+   * Status from the School_Fee_Payments ledger on every read. */
+  const loadAccounts = useCallback(async (studentId: string) => {
+    setAccountsLoading(true);
+    setAccountsError(null);
+    try {
+      setAccounts(await listSchoolFees({ Student_ID: studentId }));
+    } catch (err) {
+      setAccounts([]);
+      setAccountsError(
+        getThrownErrorMessage(err, "Unable to load this student's fee accounts.")
+      );
+    } finally {
+      setAccountsLoading(false);
+    }
+  }, []);
+
+  /** The account's transactions plus its server-derived totals. */
+  const loadLedger = useCallback(async (feeId: string) => {
+    setLedgerLoading(true);
+    setLedgerError(null);
+    try {
+      setLedger(await listFeePaymentsForAccount(feeId));
+    } catch (err) {
+      setLedger(null);
+      setLedgerError(
+        getThrownErrorMessage(err, "Unable to load this account's payment transactions.")
+      );
+    } finally {
+      setLedgerLoading(false);
+    }
+  }, []);
+
+  const resetFormForSelection = useCallback(() => {
+    setForm((f) => ({ ...f, Amount: 0, Reference: '', Notes: '' }));
+    setFieldErrors({});
+    setFormError('');
+  }, []);
+
   const handleSelectStudent = (student: Student) => {
     setSelectedStudent(student);
-    setForm((f) => ({ ...f })); // keep amount/method/date, reset term/year implicitly
-    void loadFeeRecords(student.Student_ID);
+    setSelectedAccount(null);
+    setLedger(null);
+    setLastResult(null);
+    resetFormForSelection();
+    void loadAccounts(student.Student_ID);
   };
 
-  const loadFeeRecords = useCallback(
-    async (studentId: string) => {
-      setBalanceLoading(true);
-      setBalanceError(null);
-      try {
-        const records = await listSchoolFees({ Student_ID: studentId });
-        setFeeRecords(records);
-      } catch (err) {
-        setFeeRecords([]);
-        setBalanceError(
-          getThrownErrorMessage(err, "Unable to load this student's payment records.")
-        );
-      } finally {
-        setBalanceLoading(false);
-      }
-    },
-    []
+  const handleSelectAccount = (account: Payment) => {
+    setSelectedAccount(account);
+    setLedger(null);
+    setLastResult(null);
+    resetFormForSelection();
+    void loadLedger(account.Payment_ID);
+  };
+
+  /**
+   * The selected account's figures. Once the ledger has loaded, its `account`
+   * block is the freshest server-derived truth (it is what feePayments.create
+   * just recomputed), so it wins over the earlier list snapshot.
+   */
+  const accountView = useMemo<AccountView | null>(() => {
+    if (!selectedAccount) return null;
+    if (ledger) {
+      return {
+        Fee_ID: ledger.account.Fee_ID,
+        Academic_Year: ledger.account.Academic_Year,
+        Term: ledger.account.Term,
+        Fee_Amount: Number(ledger.account.Fee_Amount) || 0,
+        Total_Paid: Number(ledger.account.Total_Paid) || 0,
+        Outstanding: Number(ledger.account.Outstanding) || 0,
+        Status: ledger.account.Status,
+      };
+    }
+    return {
+      Fee_ID: selectedAccount.Payment_ID,
+      Academic_Year: selectedAccount.Academic_Year,
+      Term: selectedAccount.Term,
+      Fee_Amount: Number(selectedAccount.Amount_Due) || 0,
+      Total_Paid: Number(selectedAccount.Amount_Paid) || 0,
+      Outstanding: Number(selectedAccount.Balance) || 0,
+      Status: selectedAccount.Status,
+    };
+  }, [selectedAccount, ledger]);
+
+  /** The balance a payment may not exceed, as the backend defines it. */
+  const outstanding = accountView ? accountView.Outstanding : 0;
+
+  /** Accounts that can still take money: not voided, not fully settled. */
+  const hasPayableAccount = useMemo(
+    () => accounts.some((a) => a.Status !== 'Voided' && (Number(a.Balance) || 0) > 0),
+    [accounts]
   );
 
-  /** Sum of the backend-reported Balance across the student's active records. */
-  const outstandingBalance = useMemo(
-    () =>
-      feeRecords
-        .filter((p) => p.Status !== 'Voided')
-        .reduce((sum, p) => sum + (Number(p.Balance) || 0), 0),
-    [feeRecords]
-  );
+  /** Newest transactions first (ISO dates, so a string sort is chronological). */
+  const sortedPayments = useMemo<FeePayment[]>(() => {
+    if (!ledger) return [];
+    return [...ledger.payments].sort((a, b) =>
+      String(b.Payment_Date || '').localeCompare(String(a.Payment_Date || ''))
+    );
+  }, [ledger]);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setFormError('');
     setFieldErrors({});
 
+    if (!selectedStudent || !selectedAccount) return;
+
+    const amount = Number(form.Amount);
     const errs: Record<string, string> = {};
-    if (!form.Academic_Year.trim()) {
-      errs.Academic_Year = FIELD_LABELS.Academic_Year + ' is required';
+
+    // Mirror of the backend's own rules (SchoolFeePayments.js): the Amount is
+    // the money received, it must be positive and may not exceed Outstanding.
+    if (!(amount > 0)) {
+      errs.Amount = FIELD_LABELS.Amount + ' must be greater than 0';
+    } else if (amount > outstanding) {
+      errs.Amount =
+        'Amount cannot exceed the outstanding balance (' + formatAmount(outstanding) + ')';
     }
-    if (!form.Term) errs.Term = FIELD_LABELS.Term + ' is required';
     if (!form.Payment_Method) {
       errs.Payment_Method = FIELD_LABELS.Payment_Method + ' is required';
-    }
-    if (Number(form.Amount_Due) <= 0) {
-      errs.Amount_Due = FIELD_LABELS.Amount_Due + ' must be greater than 0';
-    }
-    if (Number(form.Amount_Paid) < 0) {
-      errs.Amount_Paid = FIELD_LABELS.Amount_Paid + ' cannot be negative';
-    }
-    if (Number(form.Amount_Paid) > Number(form.Amount_Due)) {
-      errs.Amount_Paid =
-        FIELD_LABELS.Amount_Paid + ' cannot exceed ' + FIELD_LABELS.Amount_Due;
     }
     if (!form.Payment_Date) {
       errs.Payment_Date = FIELD_LABELS.Payment_Date + ' is required';
@@ -232,23 +318,28 @@ export function CreateSchoolFee() {
       return;
     }
 
-    if (!selectedStudent) return;
-
     setSubmitting(true);
     try {
-      await createSchoolFee({
-        Student_ID: selectedStudent.Student_ID,
-        Academic_Year: form.Academic_Year.trim(),
-        Term: form.Term as Term,
-        Amount_Due: Number(form.Amount_Due),
-        Amount_Paid: Number(form.Amount_Paid),
+      // The ONLY write this page performs: one payment transaction against an
+      // existing fee account. No schoolFees.create call, so Amount_Paid /
+      // Payment_Method / Payment_Date can never be sent to the account row.
+      const result = await createFeePayment({
+        Fee_ID: selectedAccount.Payment_ID,
+        Amount: amount,
         Payment_Method: form.Payment_Method as PaymentMethod,
         Payment_Date: form.Payment_Date,
         Reference: form.Reference.trim(),
         Notes: form.Notes.trim(),
       });
-      addToast('success', 'Payment recorded');
-      navigate('/school-fees');
+
+      setLastResult(result);
+      addToast('success', 'Payment ' + result.payment.Payment_ID + ' recorded');
+      setForm((f) => ({ ...f, Amount: 0, Reference: '', Notes: '' }));
+
+      // Refresh the account's transactions and server-derived totals, then the
+      // student's account list, so the updated balance is what the user sees.
+      await loadLedger(selectedAccount.Payment_ID);
+      await loadAccounts(selectedStudent.Student_ID);
     } catch (err) {
       const code = getThrownErrorCode(err);
       if (code === 'VALIDATION_ERROR') {
@@ -256,9 +347,12 @@ export function CreateSchoolFee() {
         for (const f of getMissingFields(err)) {
           fieldErrs[f] = (FIELD_LABELS[f] ?? f) + ' is required';
         }
-        const fieldErr = extractFieldError(err);
-        if (fieldErr.field) {
-          fieldErrs[fieldErr.field] = fieldErr.message;
+        const field = readErrorField(err);
+        if (field) {
+          fieldErrs[field] = getThrownErrorMessage(
+            err,
+            'Unable to record this payment.'
+          );
         }
         if (Object.keys(fieldErrs).length > 0) {
           setFieldErrors(fieldErrs);
@@ -271,17 +365,19 @@ export function CreateSchoolFee() {
     } finally {
       setSubmitting(false);
     }
-    };
+  };
 
-  if (canCreate === null) {
+  if (canRecord === null) {
     return <LoadingState message="Checking permissions..." />;
   }
 
-  if (canCreate === false) {
+  if (canRecord === false) {
     return (
       <div className="space-y-6">
         <div>
-          <h1 className="text-2xl font-semibold text-gray-900">Record School Fee Payment</h1>
+          <h1 className="text-2xl font-semibold text-gray-900">
+            Record School Fee Payment
+          </h1>
           <p className="text-gray-500 mt-1">Permission required</p>
         </div>
         <div className="card p-8 text-center text-gray-500">
@@ -338,8 +434,8 @@ export function CreateSchoolFee() {
               />
             ) : (
               <ul className="mt-3 space-y-1">
-                {pickableStudents.map((s) => (
-                  <li key={s.Student_ID}>
+                {pickableStudents.map((s, index) => (
+                  <li key={s.Student_ID || 'student-' + index}>
                     <button
                       type="button"
                       onClick={() => handleSelectStudent(s)}
@@ -347,7 +443,7 @@ export function CreateSchoolFee() {
                     >
                       <div className="font-medium text-gray-900">{studentLabel(s)}</div>
                       <div className="text-sm text-gray-500">
-                        {s.Student_ID} · {s.Class || '—'}
+                        {s.Student_ID} - {s.Class || 'n/a'}
                       </div>
                     </button>
                   </li>
@@ -357,157 +453,310 @@ export function CreateSchoolFee() {
           </CardBody>
         </Card>
       )}
-            {/* STEP 2: current balance + payment form, shown once a student is chosen */}
+
+      {/* STEP 2: choose one of the student's fee accounts (year + term) */}
       {selectedStudent && (
+        <Card padding="none">
+          <CardHeader
+            title="Fee accounts"
+            action={
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => handleSelectStudent(selectedStudent)}
+              >
+                Change student
+              </Button>
+            }
+          />
+          <CardBody>
+            {accountsLoading ? (
+              <LoadingState message="Loading fee accounts..." />
+            ) : accountsError ? (
+              <ErrorState
+                title="Unable to load fee accounts"
+                message={accountsError}
+                retry={() => void loadAccounts(selectedStudent.Student_ID)}
+              />
+            ) : accounts.length === 0 ? (
+              <EmptyState
+                title="No fee accounts"
+                description="This student has no school fee account yet. A fee account must exist for an academic year and term before money can be recorded against it."
+              />
+            ) : (
+              <>
+                <div className="overflow-x-auto">
+                  <table className="table">
+                    <thead>
+                      <tr>
+                        <th>Fee account</th>
+                        <th>Academic year</th>
+                        <th>Term</th>
+                        <th className="text-right">Amount due</th>
+                        <th className="text-right">Amount paid</th>
+                        <th className="text-right">Outstanding</th>
+                        <th>Status</th>
+                        <th />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {accounts.map((a, index) => {
+                        const isSelected = selectedAccount?.Payment_ID === a.Payment_ID;
+                        const payable =
+                          a.Status !== 'Voided' && (Number(a.Balance) || 0) > 0;
+                        return (
+                          <tr
+                            key={a.Payment_ID || 'account-' + index}
+                            className={isSelected ? 'bg-gray-50' : ''}
+                          >
+                            <td className="font-medium text-gray-900">
+                              {a.Payment_ID}
+                            </td>
+                            <td>{a.Academic_Year || 'n/a'}</td>
+                            <td>{a.Term || 'n/a'}</td>
+                            <td className="text-right">{formatAmount(a.Amount_Due)}</td>
+                            <td className="text-right">{formatAmount(a.Amount_Paid)}</td>
+                            <td className="text-right">{formatAmount(a.Balance)}</td>
+                            <td>
+                              <StatusBadge
+                                label={a.Status}
+                                variant={getStatusVariant(a.Status)}
+                              />
+                            </td>
+                            <td>
+                              {payable ? (
+                                <button
+                                  type="button"
+                                  onClick={() => handleSelectAccount(a)}
+                                  className="text-xs font-medium text-blue-600 hover:text-blue-800"
+                                >
+                                  {isSelected ? 'Selected' : 'Select'}
+                                </button>
+                              ) : (
+                                <span className="text-xs text-gray-400">
+                                  {a.Status === 'Voided' ? 'Voided' : 'Settled'}
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {!hasPayableAccount && (
+                  <p className="mt-4 text-sm text-gray-500">
+                    Every fee account for this student is settled or voided, so there
+                    is nothing left to pay.
+                  </p>
+                )}
+              </>
+            )}
+          </CardBody>
+        </Card>
+      )}
+
+      {/* STEP 3: the selected account, its transactions and the payment form */}
+      {selectedStudent && selectedAccount && accountView && (
         <>
-          <Card padding="none">
-            <CardHeader title="Current balance" />
+          <Card>
+            <CardHeader
+              title={'Fee account ' + accountView.Fee_ID}
+              action={
+                <StatusBadge
+                  label={accountView.Status}
+                  variant={getStatusVariant(accountView.Status)}
+                />
+              }
+            />
             <CardBody>
-              {balanceLoading ? (
-                <LoadingState message="Loading payment records..." />
-              ) : balanceError ? (
+              <dl className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                <div>
+                  <dt className="text-gray-500">Student</dt>
+                  <dd className="font-medium text-gray-900">
+                    {studentLabel(selectedStudent)}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-gray-500">Academic year</dt>
+                  <dd className="font-medium text-gray-900">
+                    {accountView.Academic_Year || 'n/a'}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-gray-500">Term</dt>
+                  <dd className="font-medium text-gray-900">{accountView.Term || 'n/a'}</dd>
+                </div>
+                <div>
+                  <dt className="text-gray-500">Transactions</dt>
+                  <dd className="font-medium text-gray-900">
+                    {ledger ? ledger.payments.length : 'n/a'}
+                  </dd>
+                </div>
+              </dl>
+
+              <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-6">
+                <StatCard
+                  title="Amount Due"
+                  value={formatAmount(accountView.Fee_Amount)}
+                  subtitle="Fee amount for this account"
+                />
+                <StatCard
+                  title="Amount Paid"
+                  value={formatAmount(accountView.Total_Paid)}
+                  subtitle="Sum of non-voided payments"
+                />
+                <StatCard
+                  title="Outstanding Balance"
+                  value={formatAmount(accountView.Outstanding)}
+                  subtitle={
+                    accountView.Outstanding > 0 ? 'Still to be paid' : 'Fully settled'
+                  }
+                />
+              </div>
+            </CardBody>
+          </Card>
+
+          {lastResult && (
+            <div className="card p-4 border-l-4 border-green-500">
+              <p className="font-medium text-gray-900">
+                Payment {lastResult.payment.Payment_ID} recorded -{' '}
+                {formatAmount(lastResult.payment.Amount)}
+              </p>
+              <p className="text-sm text-gray-600 mt-1">
+                Updated balance for {accountView.Fee_ID}:{' '}
+                {formatAmount(lastResult.account.Amount_Paid)} paid of{' '}
+                {formatAmount(lastResult.account.Amount_Due)},{' '}
+                {formatAmount(lastResult.account.Outstanding)} outstanding.
+              </p>
+            </div>
+          )}
+
+          <Card padding="none">
+            <CardHeader title="Payment transactions" />
+            <CardBody>
+              {ledgerLoading ? (
+                <LoadingState message="Loading payment transactions..." />
+              ) : ledgerError ? (
                 <ErrorState
-                  title="Unable to load payment records"
-                  message={balanceError}
-                  retry={() => void loadFeeRecords(selectedStudent.Student_ID)}
+                  title="Unable to load payment transactions"
+                  message={ledgerError}
+                  retry={() => void loadLedger(selectedAccount.Payment_ID)}
+                />
+              ) : sortedPayments.length === 0 ? (
+                <EmptyState
+                  title="No payments recorded"
+                  description="No money has been received against this fee account yet."
                 />
               ) : (
-                <>
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                    <StatCard
-                      title="Outstanding Balance"
-                      value={formatAmount(outstandingBalance)}
-                      subtitle="Sum of active balances"
-                    />
-                    <StatCard
-                      title="Payment Records"
-                      value={feeRecords.length}
-                      subtitle="All records"
-                    />
-                    <StatCard
-                      title="Active Records"
-                      value={feeRecords.filter((p) => p.Status !== 'Voided').length}
-                      subtitle="Non-voided"
-                    />
-                  </div>
-
-                  {feeRecords.length > 0 ? (
-                    <div className="mt-4 overflow-x-auto">
-                      <table className="table">
-                        <thead>
-                          <tr>
-                            <th>Year</th>
-                            <th>Term</th>
-                            <th className="text-right">Due</th>
-                            <th className="text-right">Paid</th>
-                            <th className="text-right">Balance</th>
-                            <th>Status</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {feeRecords.map((p) => (
-                            <tr key={p.Payment_ID}>
-                              <td>{p.Academic_Year || '—'}</td>
-                              <td>{p.Term || '—'}</td>
-                              <td className="text-right">{formatAmount(p.Amount_Due)}</td>
-                              <td className="text-right">{formatAmount(p.Amount_Paid)}</td>
-                              <td className="text-right">{formatAmount(p.Balance)}</td>
-                              <td>
-                                <StatusBadge
-                                  label={p.Status}
-                                  variant={getStatusVariant(p.Status)}
-                                />
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  ) : (
-                    <EmptyState
-                      title="No payment records"
-                      description="This student has no recorded fee payments yet."
-                      className="mt-4"
-                    />
-                  )}
-                                </>
+                <div className="overflow-x-auto">
+                  <table className="table">
+                    <thead>
+                      <tr>
+                        <th>Payment ID</th>
+                        <th className="text-right">Amount</th>
+                        <th>Payment method</th>
+                        <th>Payment date</th>
+                        <th>Reference</th>
+                        <th>Recorded by</th>
+                        <th>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sortedPayments.map((p, index) => (
+                        <tr key={p.Payment_ID || 'payment-' + index}>
+                          <td className="font-medium text-gray-900">{p.Payment_ID}</td>
+                          <td className="text-right">{formatAmount(p.Amount)}</td>
+                          <td>{p.Payment_Method || 'n/a'}</td>
+                          <td>{p.Payment_Date || 'n/a'}</td>
+                          <td>{p.Reference || 'n/a'}</td>
+                          <td>{p.Recorded_By || 'n/a'}</td>
+                          <td>
+                            <StatusBadge
+                              label={p.Status}
+                              variant={getStatusVariant(p.Status)}
+                            />
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               )}
             </CardBody>
           </Card>
 
           <Card padding="none">
             <CardHeader
-              title="Payment details"
+              title="Record payment"
               action={
-                formError ? <span className="text-sm text-red-600">{formError}</span> : undefined
+                formError ? (
+                  <span className="text-sm text-red-600">{formError}</span>
+                ) : undefined
               }
             />
             <CardBody>
-              <form onSubmit={handleSubmit} className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <form
+                onSubmit={handleSubmit}
+                className="grid grid-cols-1 md:grid-cols-2 gap-4"
+              >
                 <div className="md:col-span-2">
                   <FormInput
-                    label="Student"
-                    name="Student_ID"
-                    value={selectedStudent.Student_ID}
+                    label="Fee account"
+                    name="Fee_ID"
+                    value={accountView.Fee_ID}
                     readOnly
-                    hint={studentLabel(selectedStudent)}
+                    hint={
+                      (accountView.Academic_Year || 'n/a') +
+                      ' - ' +
+                      (accountView.Term || 'n/a') +
+                      ' - outstanding ' +
+                      formatAmount(accountView.Outstanding)
+                    }
                   />
                 </div>
-                <FormInput
-                  label="Academic Year"
-                  name="Academic_Year"
-                  value={form.Academic_Year}
-                  onChange={(e) => setForm((f) => ({ ...f, Academic_Year: e.target.value }))}
-                  error={fieldErrors.Academic_Year}
-                  placeholder="e.g. 2024/2025"
+
+                {/* The money actually received. This is NOT the fee amount. */}
+                <CurrencyInput
+                  label="Amount received"
+                  name="Amount"
+                  value={form.Amount}
+                  onChange={(n) => setForm((f) => ({ ...f, Amount: n }))}
+                  error={fieldErrors.Amount}
+                  hint={
+                    'Up to ' +
+                    formatAmount(accountView.Outstanding) +
+                    ' may be recorded against this account.'
+                  }
                 />
                 <FormSelect
-                  label="Term"
-                  name="Term"
-                  value={form.Term}
-                  onChange={(e) => setForm((f) => ({ ...f, Term: e.target.value }))}
-                  options={TERM_OPTIONS}
-                  error={fieldErrors.Term}
-                />
-                <CurrencyInput
-                  label="Amount Due"
-                  name="Amount_Due"
-                  value={form.Amount_Due}
-                  onChange={(n) => setForm((f) => ({ ...f, Amount_Due: n }))}
-                  error={fieldErrors.Amount_Due}
-                />
-                <CurrencyInput
-                  label="Amount Paid"
-                  name="Amount_Paid"
-                  value={form.Amount_Paid}
-                  onChange={(n) => setForm((f) => ({ ...f, Amount_Paid: n }))}
-                  error={fieldErrors.Amount_Paid}
-                />
-                <FormSelect
-                  label="Payment Method"
+                  label="Payment method"
                   name="Payment_Method"
                   value={form.Payment_Method}
-                  onChange={(e) => setForm((f) => ({ ...f, Payment_Method: e.target.value }))}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, Payment_Method: e.target.value }))
+                  }
                   options={PAYMENT_METHOD_OPTIONS}
                   error={fieldErrors.Payment_Method}
                 />
                 <DateInput
-                  label="Payment Date"
+                  label="Payment date"
                   name="Payment_Date"
                   value={form.Payment_Date}
-                  onChange={(e) => setForm((f) => ({ ...f, Payment_Date: e.target.value }))}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, Payment_Date: e.target.value }))
+                  }
                   error={fieldErrors.Payment_Date}
                 />
-                <div className="md:col-span-2">
-                  <FormInput
-                    label="Reference"
-                    name="Reference"
-                    value={form.Reference}
-                    onChange={(e) => setForm((f) => ({ ...f, Reference: e.target.value }))}
-                    error={fieldErrors.Reference}
-                    hint="Optional — e.g. receipt number or bank transfer reference"
-                  />
-                </div>
+                <FormInput
+                  label="Reference"
+                  name="Reference"
+                  value={form.Reference}
+                  onChange={(e) => setForm((f) => ({ ...f, Reference: e.target.value }))}
+                  error={fieldErrors.Reference}
+                  hint="Optional - receipt or bank reference"
+                />
                 <div className="md:col-span-2">
                   <FormTextarea
                     label="Notes"

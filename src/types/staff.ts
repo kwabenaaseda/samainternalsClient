@@ -2,7 +2,13 @@
 // Based on Staff.js schema
 
 export type StaffStatus = 'Active' | 'Inactive' | 'On Leave' | 'Terminated';
-export type SalaryFrequency = 'Monthly' | 'BiWeekly';
+
+/**
+ * Mirrors CONFIG.SALARY_FREQUENCY in Config.js, which is the allow-list
+ * `assertOneOf_` validates Salary_Frequency against. Anything outside this union
+ * is rejected by the backend with VALIDATION_ERROR.
+ */
+export type SalaryFrequency = 'Monthly' | 'Bi-weekly' | 'Weekly' | 'Annual';
 
 export interface Staff {
   Staff_ID: string;

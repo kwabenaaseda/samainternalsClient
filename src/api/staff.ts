@@ -20,10 +20,25 @@ import type {
  */
 
 /**
+ * Raw payload of `staff.list`.
+ *
+ * Staff.js wraps the rows: success({ staff: records, count }). The API client
+ * returns the envelope's `data` verbatim, so the wrapper MUST be unwrapped here
+ * -- typing this call as `Staff[]` would hand callers an object and any
+ * .filter()/.map() would throw at runtime.
+ */
+interface StaffListResult {
+  staff: Staff[];
+  count: number;
+}
+
+/**
  * List all staff
+ * No pagination in MVP1 - returns all records
  */
 export async function listStaff(): Promise<Staff[]> {
-  return apiGet<Staff[]>('staff.list');
+  const result = await apiGet<StaffListResult>('staff.list');
+  return Array.isArray(result?.staff) ? result.staff : [];
 }
 
 /**
